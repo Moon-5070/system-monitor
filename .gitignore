@@ -1,0 +1,24 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# SQLite database
+db.sqlite3
+
+# Django specific
+/staticfiles/
+media/
+*.log
+
+# VSCode settings
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db

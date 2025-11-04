@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>System Monitor</title>
+
+  <style>
+    body {
+      font-family: "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 24px;
+      background: #f8f9fa;
+      color: #222;
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 28px;
+    }
+    .muted { color: #666; font-size: 13px; }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .card {
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .title {
+      font-weight: 600;
+      font-size: 15px;
+      margin-bottom: 8px;
+    }
+    .row { display: flex; align-items: center; gap: 12px; }
+    .flex1 { flex: 1; }
+
+    /* 게이지 카드 레이아웃: 위(링+숫자), 아래(스파크) */
+    .gauge { display: flex; flex-direction: column; gap: 8px; }
+
+    /* 스파크라인 */
+    .spark { width: 100%; height: 48px; }
+    .spark svg { width: 100%; height: 100%; display: block; }
+
+    /* 상태 색상 */
+    .ok { background: #e6f4ea; color: #0a662e; padding: 8px 12px; border-radius: 6px; }
+    .bad { background: #fbeaea; color: #b40000; padding: 8px 12px; border-radius: 6px; }
+
+    .footer { margin-top: 30px; text-align: right; color: #777; font-size: 13px; }
+  </style>
+</head>
+
+<body>
+  <h1>System Monitor</h1>
+  <div class="muted">Live metrics — Task Manager style (no external CDN)</div>
+
+  <div class="cards">
+    <!-- CPU -->
+    <div class="card">
+      <div class="title">CPU</div>
+      <div class="gauge">
+        <div class="row">
+          <div id="cpuRing"></div>
+          <div><div id="cpuNow">0%</div></div>
+        </div>
+        <div class="spark" id="cpuSpark"></div>
+      </div>
+    </div>
+
+    <!-- Memory -->
+    <div class="card">
+      <div class="title">Memory</div>
+      <div class="gauge">
+        <div class="row">
+          <div id="memRing"></div>
+          <div><div class="muted"><b>Used%:</b> <span id="memNow">0</span></div></div>
+        </div>
+        <div class="spark" id="memSpark"></div>
+      </div>
+    </div>
+
+    <!-- Disk -->
+    <div class="card">
+      <div class="title">Disk</div>
+      <div class="gauge">
+        <div class="row">
+          <div id="diskRing"></div>
+          <div><div class="muted"><b>Ping(ms):</b> <span id="pingNow">-</span></div></div>
+        </div>
+        <div class="spark" id="diskSpark"></div>
+      </div>
+    </div>
+
+    <!-- GPU/NPU -->
+    <div class="card">
+      <div class="title">GPU / NPU</div>
+      <div class="row">
+        <div id="gpuRing"></div>
+        <div id="npuRing"></div>
+      </div>
+    </div>
+
+    <!-- Network Throughput -->
+    <div class="card">
+      <div class="title">Network — Throughput</div>
+      <div class="gauge">
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <div class="muted"><b>Download Now:</b> <span id="rxNow">-</span></div>
+            <div class="muted"><b>Upload Now:</b> <span id="txNow">-</span></div>
+          </div>
+          <div class="muted">
+            <span>기준: delta(sent/recv) from agent (1s)</span>
+          </div>
+        </div>
+        <div class="spark" id="netRxSpark"></div>
+        <div class="spark" id="netTxSpark"></div>
+      </div>
+    </div>
+
+    <!-- Raw -->
+    <div class="card">
+      <div class="title">Raw (latest)</div>
+      <pre id="raw" style="font-size:12px; margin:0;"></pre>
+    </div>
+
+    <!-- Status -->
+    <div class="card">
+      <div class="title">Status</div>
+      <div id="status" class="ok">정상 폴링 중</div>
+    </div>
+  </div>
+
+  <div class="footer">
+    {{ now|date:"Y. n. j. D H:i:s" }}
+  </div>
+
+  <script>
+    const API_URL = "/api/status/?limit=50";
+    const MAX_POINTS = 60;
+    const series = { cpu: [], mem: [], disk: [], netRx: [], netTx: [] };
+    let prevNet = null;
+    let lastTs = null;
+
+    function ring(el, value) {
+      const size = 48, stroke = 6;
+      const r = (size - stroke) / 2;
+      const c = 2 * Math.PI * r;
+      const offset = c * (1 - value / 100);
+      el.innerHTML = `
+        <svg width="${size}" height="${size}">
+          <circle cx="${size/2}" cy="${size/2}" r="${r}" stroke="#eee" stroke-width="${stroke}" fill="none"/>
+          <circle cx="${size/2}" cy="${size/2}" r="${r}" stroke="#4a90e2" stroke-width="${stroke}"
+                  stroke-dasharray="${c}" stroke-dashoffset="${offset}" fill="none" stroke-linecap="round"/>
+          <text x="50%" y="54%" text-anchor="middle" font-size="13" fill="#222">${Math.round(value)}%</text>
+        </svg>`;
+    }
+
+    function spark(id, arr) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const w = el.clientWidth, h = el.clientHeight;
+      if (arr.length < 2) return;
+      const max = Math.max(...arr), min = Math.min(...arr);
+      const pts = arr.map((v,i)=>[i/(arr.length-1)*w, h - ((v-min)/(max-min+1e-6))*h]);
+      const d = pts.map((p,i)=> (i===0?'M':'L')+p[0]+','+p[1]).join(' ');
+      el.innerHTML = `<svg><path d="${d}" fill="none" stroke="#4a90e2" stroke-width="2"/></svg>`;
+    }
+
+    async function poll() {
+      try {
+        const res = await fetch(API_URL);
+        const js = await res.json();
+        const items = js.items || [];
+        const last = items[items.length - 1];
+        if (!last) return;
+        document.getElementById("raw").textContent = JSON.stringify(last, null, 2);
+
+        // ---- Network throughput 계산 (누적 MB → Kbps)
+        const nowMs = new Date(last.timestamp).getTime();
+        let rxKbps = null, txKbps = null;
+        if (prevNet && lastTs) {
+          const dt = Math.max(0.5, (nowMs - lastTs) / 1000);
+          const dRecvMB = (last.recv ?? 0) - (prevNet.recvMB ?? 0);
+          const dSentMB = (last.sent ?? 0) - (prevNet.sentMB ?? 0);
+          rxKbps = Math.max(0, dRecvMB * 8 * 1024 / dt);
+          txKbps = Math.max(0, dSentMB * 8 * 1024 / dt);
+        }
+        prevNet = { recvMB: (last.recv ?? 0), sentMB: (last.sent ?? 0) };
+        lastTs = nowMs;
+
+        // ---- Ring update
+        ring(cpuRing, last.cpu || 0);
+        ring(memRing, last.mem || 0);
+        ring(diskRing, last.disk || 0);
+        ring(gpuRing, 0);
+        ring(npuRing, 0);
+        cpuNow.textContent = Math.round(last.cpu) + "%";
+        memNow.textContent = Math.round(last.mem) + "%";
+        pingNow.textContent = last.ping ?? "-";
+
+        // ---- 시리즈 push
+        series.cpu.push(last.cpu || 0);
+        series.mem.push(last.mem || 0);
+        series.disk.push(last.disk || 0);
+        series.netRx.push(rxKbps ?? 0);
+        series.netTx.push(txKbps ?? 0);
+
+        for (const k in series) {
+          if (series[k].length > MAX_POINTS)
+            series[k] = series[k].slice(-MAX_POINTS);
+        }
+
+        spark("cpuSpark", series.cpu);
+        spark("memSpark", series.mem);
+        spark("diskSpark", series.disk);
+        spark("netRxSpark", series.netRx);
+        spark("netTxSpark", series.netTx);
+
+        rxNow.textContent = rxKbps != null ? Math.round(rxKbps) + " Kbps" : "-";
+        txNow.textContent = txKbps != null ? Math.round(txKbps) + " Kbps" : "-";
+
+        status.textContent = "정상 폴링 중";
+        status.className = "ok";
+
+      } catch (e) {
+        status.textContent = "⛔ 연결 오류";
+        status.className = "bad";
+        console.error(e);
+      }
+    }
+
+    setInterval(poll, 1000);
+    poll();
+  </script>
+</body>
+</html>
